@@ -73,7 +73,6 @@ p2
 dev.off()
 
 
-
 library(dplyr)
 library(purrr)
 library(tibble)
@@ -103,72 +102,55 @@ matched_all %>%
   arrange(Sample)
 
 
+matched_clone_list <- matched_all %>%
+  group_by(Sample) %>%
+  group_split() %>%
+  set_names(map_chr(., ~ .x$Sample[1])) %>%
+  map(~ set_names(.x$Clones, .x$match_key))
+
 ###############################################################################################
 
-library(immunarch)
-library(ggplot2)
-library(dplyr)
-library(stringr)
-library(purrr) # For map_chr, imap_dfr
-library(tibble) # For tibble::column_to_rownames, if needed
-
-
-# Step 1: Load and clean VDJdb
-vdjdb <- read.delim("Data/SearchTable-2025-06-03 19_34_18.85.tsv", sep = "\t", stringsAsFactors = FALSE) %>%
-  mutate(
-    V_clean = sub("\\*.*", "", V),
-    match_key = paste(CDR3, V_clean, sep = "_")
-  )
-
-# Step 2: Combine and clean all ImmunoSeq samples, then match with VDJdb
-matched_all <- imm_data$data %>%
-  imap_dfr(~ .x %>%
-             mutate(
-               Sample = .y, # Add a 'Sample' column to each dataframe from its name
-               V_clean = sub("\\*.*", "", V.name),
-               match_key = paste(CDR3.aa, V_clean, sep = "_")
-             )
-  ) %>%
-  inner_join(vdjdb, by = "match_key", relationship = "many-to-many") %>%
-  left_join(imm_data$meta, by = "Sample") # Add metadata (including 'Time')
-
-# --- Sum and Visualize Total Frequency of Matched Clonotypes by Time ---
-
-# Calculate the total frequency of these specific matched clonotypes for each Time point.
-# This is where we sum the 'frequency' column *only for the matched clonotypes* within each 'Time' group.
-total_frequency_by_time <- matched_all %>%
-  group_by(Time) %>%
+epitope_summary <- matched_all %>%
+  group_by(Sample, Epitope.gene, Time) %>%
   summarise(
-    Total_Matched_Frequency = sum(frequency), # Sum the frequencies of all matched clonotypes
-    .groups = "drop" # Drop the grouping to return a clean dataframe
-  ) %>%
-  # Ensure the time points are ordered correctly for plotting (e.g., Pre-TX, Post-RAD, 4Weeks)
-  # Adjust these levels if your 'Time' values are slightly different
-  mutate(Time = factor(Time, levels = c("Pre-TX", "Post-RAD", "4Weeks")))
-
-print(total_frequency_by_time)
-
-# Visualize the total frequency of matched clonotypes per Time Point
-p_total_freq_antigens <- ggplot(total_frequency_by_time, aes(x = Time, y = Total_Matched_Frequency, fill = Time)) +
-  geom_col(color = "black") + # geom_col creates a bar plot; color adds a border to bars
-  # Add labels on top of the bars, formatted to a few decimal places
-  geom_text(aes(label = round(Total_Matched_Frequency, 5)), vjust = -0.5, size = 4) +
-  labs(
-    title = "Total Frequency of Self-Directed/Cancer-Related Clonotypes by Time Point",
-    x = "Time Point",
-    y = "Total Frequency of Matched Clonotypes"
-  ) +
-  theme_minimal() + # A clean ggplot theme
-  theme(
-    legend.position = "none", # No need for a legend if 'fill' is mapped to 'x'
-    plot.title = element_text(hjust = 0.5, face = "bold"), # Center and bold title
-    axis.text.x = element_text(angle = 45, hjust = 1) # Angle x-axis labels if needed
+    total_clones = sum(Clones, na.rm = TRUE),
+    .groups = "drop"
   )
 
-print(p_total_freq_antigens)
+epitope_summary <- epitope_summary %>%
+  left_join(imm_data$meta%>% select(Sample, Time), by = "Time", relationship = "many-to-many")
 
-# --- Save your plot ---
-jpeg("total_matched_antigens_frequency_plot.jpeg", width = 900, height = 700, res = 300) # Increased resolution
-print(p_total_freq_antigens)
-dev.off()
+epitope_time_summary <- epitope_summary %>%
+  group_by(Time, Epitope.gene) %>%
+  summarise(
+    sum_clones = sum(total_clones, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+head(epitope_time_summary)
+
+epitope_gene_list <- epitope_time_summary$Epitope.gene
+head(epitope_gene_list)
+
+print(epitope_gene_list)
+
+
+ggplot(epitope_time_summary, aes(x = Epitope.gene, y = sum_clones, fill = Epitope.gene)) +
+  geom_bar(stat = "identity", position = "dodge") + # stat="identity" uses the actual y value
+  facet_wrap(~ Time, scales = "free_x") + # Create separate plots for each 'Time' point
+  labs(
+    title = "Self Targeted T-Cell Clonotype Counts Over Time",
+    x = "Epitope Gene",
+    y = "Sum of Clones",
+    fill = "Epitope Gene"
+  ) +
+  theme_minimal() + # A clean theme for the plot
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels for readability
+    plot.title = element_text(hjust = 0.5, face = "bold"), # Center and bold the title
+    legend.position = "none" # Hide the legend if fill is redundant with x-axis labels
+  ) +
+  scale_fill_viridis_d() # Use a color-blind friendly palette for fills
+
+
 
