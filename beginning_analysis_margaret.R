@@ -139,45 +139,206 @@ kruskal_results <- hill_div_merged %>%
 
 print(kruskal_results)
 
-__________________________________
+__________________________________# Uploading and merging U number table 
 
-library(vroom)
+# assuming you have meta and patient_map loaded as data.frames
+meta_new <- merge(imm_meta, U_numbers, by = "Sample", all.x = TRUE)
+
+colnames(imm_meta)
+colnames(U_numbers)
+
+head(meta_new)
+
+imm_data$meta <- meta_new
+
+head(imm_data)
+
+print(imm_data$meta)
+________________________________# grouping by patient 
+
+# Group by patient ID (U Number)
+immdata_by_patient <- split(imm_data$data, imm_data$meta$`U Number`)
+
+# Each element in immdata_by_patient is now a list of samples for that patient
+names(immdata_by_patient)
+
 library(immunarch)
+
+imm_diversity <- repDiversity(imm_data$data, "chao1")
+
+# Compute diversity
+imm_diversity <- repDiversity(imm_data$data, "chao1")
+
+# Add metadata
+imm_diversity$PatientID <- imm_data$meta$`U Number`
+imm_diversity$Group <- imm_data$meta$Group
+
+# Plot diversity by patient over time
+library(ggplot2)
+ggplot(imm_diversity, aes(x = Group, y = Chao1, color = PatientID, group = PatientID)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Clonal Diversity (Chao1) Over Time by Patient",
+       x = "Timepoint", y = "Chao1 Diversity")
+
+
+____
+
+# Compute diversity
+imm_diversity <- repDiversity(imm_data$data, "chao1")
+
+# Convert to data frame
+imm_diversity_df <- data.frame(
+  Sample = names(imm_diversity),
+  Chao1 = as.numeric(imm_diversity)
+)
+
+# Merge with metadata
+imm_diversity_df <- merge(imm_diversity_df, imm_data$meta, by = "Sample")
+
+# Plot
+library(ggplot2)
+ggplot(imm_diversity_df, aes(x = Group, y = Chao1, color = `U Number`, group = `U Number`)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Clonal Diversity (Chao1) Over Time by Patient",
+       x = "Timepoint", y = "Chao1 Diversity")
+
+str(imm_diversity)
+
+
+# 1️⃣ Convert matrix to data frame
+imm_diversity_df <- as.data.frame(imm_diversity)
+imm_diversity_df$Sample <- rownames(imm_diversity_df)
+
+# 2️⃣ Merge with metadata
+imm_diversity_df <- merge(imm_diversity_df, imm_data$meta, by = "Sample")
+
+# 3️⃣ Reorder the Group factor
+imm_diversity_df$Group <- factor(imm_diversity_df$Group, levels = c(
+  "Pre-treatment", "Post-treatment", "4 weeks", "16 weeks"
+))
+
+# 4️⃣ Plot
+library(ggplot2)
+ggplot(imm_diversity_df, aes(x = Group, y = Estimator, color = `U Number`, group = `U Number`)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Clonal Diversity (Chao1) Over Time by Patient",
+       x = "Timepoint", y = "Chao1 Diversity")
+
+________#ANOVA test
+
+install.packages("lmerTest")
+
+library(lme4)
+# Random intercept for patient
+model <- lmer(Estimator ~ Group + (1 | `U Number`), data = imm_diversity_df)
+summary(model)
+
+# Check for overall effect of Group
+
+library(lmerTest)
+anova(model)
+
+____________________
+
+library(ggplot2)
+
+ggplot(imm_diversity_df, aes(x = Group, y = Estimator, group = `U Number`, color = `U Number`)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "TCR Diversity over Time", y = "Estimator", x = "Timepoint")
+
+______________________ #formatting data for GLIPH2
+
 library(dplyr)
+library(stringr)
+library(tibble)
 
-# Load immunarch data
-immdata <- repLoad("Data2/")
+# Rename the patient column
+meta_data <- meta_new %>%
+  rename(Patient = `U Number`)
 
-# Add U number to each sample
-for (sample_name in names(immdata$data)) {
+# Generate GLIPH2 input
+gliph_input_list <- lapply(names(imm_data$data), function(s) {
+  dat <- imm_data$data[[s]]
+  md  <- meta_data %>% filter(Sample == s)
   
-  file_path <- paste0("Data2/", sample_name, ".tsv")
-  manual_data <- vroom::vroom(file_path, show_col_types = FALSE)
-  
-  rep_data <- immdata$data[[sample_name]]
-  
-  joined_data <- left_join(rep_data,
-                           manual_data %>% select(CDR3.aa, V.name, J.name, `U number`),
-                           by = c("CDR3.aa", "V.name", "J.name"))
-  
-  immdata$data[[sample_name]] <- joined_data
-}
+  tibble(
+    CDR3b               = dat$CDR3.aa,
+    Vb                  = str_replace(dat$V.name, "\\*.*", ""),  # drop *01 suffixes
+    Jb                  = str_replace(dat$J.name, "\\*.*", ""),
+    CDR3a               = NA,  # not used for TCRB, but required
+    `Subject:condition` = paste0(md$Patient, ":", md$Group),
+    Frequency           = dat$Clones
+  ) %>% filter(!is.na(CDR3b) & CDR3b != "")
+})
 
-# ✅ Now inspect outside the loop
-head(immdata$data[[1]]$`U number`)  # See if U numbers were added
-View(immdata$data[[1]])             # Inspect first sample
+# Combine into one large GLIPH2-compatible table
+gliph_input_df <- bind_rows(gliph_input_list) %>%
+  select(CDR3b, Vb, Jb, CDR3a, `Subject:condition`, Frequency)
 
-colnames(immdata$data[[1]])
+# Write to file
+write.table(gliph_input_df, "gliph2_input_merged_full.txt", sep = "\t",
+            quote = FALSE, row.names = FALSE)
 
-sample_name <- names(immdata$data)[1]
-file_path <- paste0("Data2/", sample_name, ".tsv")
+________________________________ # interpreting GLIPH2_output_data
 
-manual_data <- vroom::vroom(file_path, show_col_types = FALSE)
-rep_data <- immdata$data[[sample_name]]
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
 
-# See top few values for key columns
-head(rep_data[, c("CDR3.aa", "V.name", "J.name")])
-head(manual_data[, c("CDR3.aa", "V.name", "J.name")])
+# Use your already-loaded data frame
+gliph_data <- GLIPH2_output_data
+
+# --- Step 1: Extract patient ID and timepoint ---
+gliph_data <- gliph_data %>%
+  mutate(
+    PatientID = str_extract(Sample, "^.*(?=:)"),  # Everything before the colon
+    Timepoint = str_extract(Sample, "(?<=:).*")   # Everything after the colon
+  )
+
+# --- Step 2: Filter to one patient ---
+patient_id <- "U4564519"  # Change this as needed
+patient_data <- gliph_data %>%
+  filter(PatientID == patient_id)
+
+# --- Step 3: Identify top clones per timepoint ---
+top_clones <- patient_data %>%
+  group_by(Timepoint) %>%
+  slice_max(order_by = Freq, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+# --- Step 4: Create a unique Clone ID ---
+top_clones <- top_clones %>%
+  mutate(CloneID = paste(TcRb, V, J, sep = "_"))
+
+# --- Step 5: Plot clone dynamics over time ---
+ggplot(top_clones, aes(x = Timepoint, y = Freq, group = CloneID, color = CloneID)) +
+  geom_line(linewidth = 1) +  # <-- updated here
+  geom_point(size = 2) +
+  labs(
+    title = paste("Top Clonal Dynamics for Patient", patient_id),
+    x = "Timepoint",
+    y = "Clone Frequency",
+    color = "Clone ID"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+
+
+
 
 
 
